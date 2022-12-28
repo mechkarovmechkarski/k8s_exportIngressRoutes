@@ -20,7 +20,19 @@ import (
 )
 
 func main() {
-	// Prepare kubeconfig
+	kubeConfig := prepareKubeConfig()
+	ingressRoutesClient := createNewClient(kubeConfig)
+	ingressRoutesList := ListIngressRoutes(context.Background(), ingressRoutesClient, "")
+
+	// Create a map for hosts and IP's
+	hostNames := make(map[string]string, len(ingressRoutesList))
+	ingressRoutesListProcessing(ingressRoutesList, hostNames)
+
+	csvFile := createCsv("IngressRoutes-DNS-IP.csv")
+	writeToCsv(csvFile, hostNames)
+}
+
+func prepareKubeConfig() *rest.Config {
 	var kubeConfigName string
 	userHomeDir, err := os.UserHomeDir()
 	if err != nil {
@@ -28,7 +40,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	fmt.Printf("Enter kubeconfig file to use from %s :", filepath.Join(userHomeDir, ".kube"))
+	fmt.Printf("Enter kubeconfig file to use from %s :\n", filepath.Join(userHomeDir, ".kube"))
 	fmt.Scanln(&kubeConfigName)
 
 	kubeConfigPath := filepath.Join(userHomeDir, ".kube", kubeConfigName)
@@ -39,24 +51,37 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Create dynamic client for k8s
-	ingressRouteClient, err := newClient(kubeConfig)
+	return kubeConfig
+}
+
+// Create a dynamic client for k8s
+func createNewClient(config *rest.Config) dynamic.Interface {
+	dynClient, err := dynamic.NewForConfig(config)
 	if err != nil {
 		fmt.Printf("Cannot create dynamic interface: %v\n", err)
 		os.Exit(1)
 	}
 
-	// Get the list of IngressRoutes
-	ctx := context.Background()
-	ingressRouteList, err := ListIngressRoutes(ctx, ingressRouteClient, "")
+	return dynClient
+}
+
+// Create a list with IngressRoutes
+func ListIngressRoutes(ctx context.Context, client dynamic.Interface, namespace string) []unstructured.Unstructured {
+	// point schema to use
+	var ingressRouteResource = schema.GroupVersionResource{Group: "traefik.containo.us", Version: "v1alpha1", Resource: "ingressroutes"}
+	// GET /apis/traefik.containo.us/v1alpha1/namespaces/{namespace}/ingressroutes/
+	list, err := client.Resource(ingressRouteResource).Namespace(namespace).List(ctx, v1.ListOptions{})
 	if err != nil {
 		fmt.Printf("Cannot create ingressroute list: %v\n", err)
 		os.Exit(1)
 	}
 
-	// Start processing the list
-	hostNames := make(map[string]string, len(ingressRouteList))
-	for _, ingressRoute := range ingressRouteList {
+	return list.Items
+}
+
+// Start processing the list
+func ingressRoutesListProcessing(list []unstructured.Unstructured, outList map[string]string) {
+	for _, ingressRoute := range list {
 		// Convert the list
 		unstructured := ingressRoute.UnstructuredContent()
 		for _, v := range unstructured {
@@ -73,26 +98,37 @@ func main() {
 					continue
 				}
 				// save DNS name and IP
-				hostNames[match[0]] = ip
+				outList[match[0]] = ip
 			}
 		}
 	}
+}
 
-	// Create csv file
-	csvFile, err := os.Create("IngressRoutes-DNS-IP.csv")
+func resolveDNS(name string) (string, error) {
+	ips, err := net.LookupIP(name)
 	if err != nil {
-		// log.Fatalf("failed creating file: %s", err)
+		fmt.Fprintf(os.Stderr, "Could not get IPs: %v\n", err)
+		return "", err
+	}
+	return ips[0].String(), err
+}
+
+func createCsv(fName string) *os.File {
+	csvFile, err := os.Create(fName)
+	if err != nil {
 		fmt.Printf("Failed to create csv file: %s", err)
 		os.Exit(1)
 	}
+	return csvFile
+}
 
-	// Write to the csv file
-	csvwriter := csv.NewWriter(csvFile)
+func writeToCsv(c *os.File, hostNames map[string]string) {
+	csvwriter := csv.NewWriter(c)
 	// Write first row
 	firstRow := make([]string, 0)
 	firstRow = append(firstRow, "name")
 	firstRow = append(firstRow, "ip")
-	err = csvwriter.Write(firstRow)
+	err := csvwriter.Write(firstRow)
 	if err != nil {
 		fmt.Printf("Failed to write in csv file: %s", err)
 		os.Exit(1)
@@ -111,35 +147,5 @@ func main() {
 	}
 
 	csvwriter.Flush()
-	csvFile.Close()
-}
-
-func newClient(config *rest.Config) (dynamic.Interface, error) {
-	dynClient, err := dynamic.NewForConfig(config)
-	if err != nil {
-		return nil, err
-	}
-
-	return dynClient, nil
-}
-
-func ListIngressRoutes(ctx context.Context, client dynamic.Interface, namespace string) ([]unstructured.Unstructured, error) {
-	// point schema to use
-	var ingressRouteResource = schema.GroupVersionResource{Group: "traefik.containo.us", Version: "v1alpha1", Resource: "ingressroutes"}
-	// GET /apis/traefik.containo.us/v1alpha1/namespaces/{namespace}/ingressroutes/
-	list, err := client.Resource(ingressRouteResource).Namespace(namespace).List(ctx, v1.ListOptions{})
-	if err != nil {
-		return nil, err
-	}
-
-	return list.Items, nil
-}
-
-func resolveDNS(name string) (string, error) {
-	ips, err := net.LookupIP(name)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Could not get IPs: %v\n", err)
-		return "", err
-	}
-	return ips[0].String(), err
+	c.Close()
 }
