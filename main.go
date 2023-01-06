@@ -14,6 +14,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/kubernetes/typed/extensions/v1beta1"
+
 	// "k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
@@ -21,15 +23,55 @@ import (
 
 func main() {
 	kubeConfig := prepareKubeConfig()
-	ingressRoutesClient := createNewClient(kubeConfig)
-	ingressRoutesList := ListIngressRoutes(context.Background(), ingressRoutesClient, "")
 
-	// Create a map for hosts and IP's
-	hostNames := make(map[string]string, len(ingressRoutesList))
-	ingressRoutesListProcessing(ingressRoutesList, hostNames)
+	availableResources := []string{"IngressRoutes", "Ingresses"}
+	fmt.Printf("\nChoose resource ID from the list:\nResource Name \t\tID\n")
+	fmt.Print("---------------------   ---\n")
+	for i := 0; i < len(availableResources); i++ {
+		fmt.Printf("%s \t\t[%d]\n", availableResources[i], i)
+	}
+	var resource string
+	fmt.Print("ID: ")
+	fmt.Scanln(&resource)
 
-	csvFile := createCsv("IngressRoutes-DNS-IP.csv")
-	writeToCsv(csvFile, hostNames)
+	switch resource {
+	case availableResources[0]:
+		dynClient := createDynClient(kubeConfig)
+		var resourceList []unstructured.Unstructured
+		resourceList = createIngressRoutesList(context.Background(), dynClient, "")
+		hosts := make(map[string]string, len(resourceList))
+		ingressRoutesListProcessing(resourceList, hosts)
+
+		csvFile := createCsv("IngressRoutes-DNS-IP.csv")
+		writeToCsv(csvFile, hosts)
+
+	case availableResources[1]:
+		newClient, err := v1beta1.NewForConfig(kubeConfig)
+		if err != nil {
+			fmt.Printf("error creating new client: %v\n", err)
+			os.Exit(1)
+		}
+		new := newClient.Ingresses("")
+		list, err := new.List(context.Background(), v1.ListOptions{})
+		if err != nil {
+			fmt.Printf("error creating new list: %v\n", err)
+			os.Exit(1)
+		}
+		hosts := make(map[string]string, len(list.Items))
+		for i := 0; i < len(list.Items); i++ {
+			rules := list.Items[i].Spec.Rules
+			for j := 0; j < len(rules); j++ {
+				resolved, _ := resolveDNS(rules[j].Host)
+				hosts[rules[j].Host] = resolved
+			}
+		}
+
+		csvFile := createCsv("Ingresses-DNS-IP.csv")
+		writeToCsv(csvFile, hosts)
+	default:
+		fmt.Print("Bad ID, please rerun the program.")
+	}
+
 }
 
 func prepareKubeConfig() *rest.Config {
@@ -40,7 +82,7 @@ func prepareKubeConfig() *rest.Config {
 		os.Exit(1)
 	}
 
-	fmt.Printf("Enter kubeconfig file to use from %s :\n", filepath.Join(userHomeDir, ".kube"))
+	fmt.Printf("Enter kubeconfig file to use from the folder:\n%s/", filepath.Join(userHomeDir, ".kube"))
 	fmt.Scanln(&kubeConfigName)
 
 	kubeConfigPath := filepath.Join(userHomeDir, ".kube", kubeConfigName)
@@ -55,7 +97,7 @@ func prepareKubeConfig() *rest.Config {
 }
 
 // Create a dynamic client for k8s
-func createNewClient(config *rest.Config) dynamic.Interface {
+func createDynClient(config *rest.Config) dynamic.Interface {
 	dynClient, err := dynamic.NewForConfig(config)
 	if err != nil {
 		fmt.Printf("Cannot create dynamic interface: %v\n", err)
@@ -66,13 +108,13 @@ func createNewClient(config *rest.Config) dynamic.Interface {
 }
 
 // Create a list with IngressRoutes
-func ListIngressRoutes(ctx context.Context, client dynamic.Interface, namespace string) []unstructured.Unstructured {
+func createIngressRoutesList(ctx context.Context, client dynamic.Interface, namespace string) []unstructured.Unstructured {
 	// point schema to use
 	var ingressRouteResource = schema.GroupVersionResource{Group: "traefik.containo.us", Version: "v1alpha1", Resource: "ingressroutes"}
 	// GET /apis/traefik.containo.us/v1alpha1/namespaces/{namespace}/ingressroutes/
 	list, err := client.Resource(ingressRouteResource).Namespace(namespace).List(ctx, v1.ListOptions{})
 	if err != nil {
-		fmt.Printf("Cannot create ingressroute list: %v\n", err)
+		fmt.Printf("Cannot create ingressroutes list: %v\n", err)
 		os.Exit(1)
 	}
 
